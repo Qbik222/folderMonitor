@@ -34,10 +34,21 @@ def initialize_firebase(url, key_path):
         cred = credentials.Certificate(key_path)
         firebase_app = firebase_admin.initialize_app(cred, {'databaseURL': url})
         database_ref = db.reference("/frequency")
+        clear_firebase_data()
         log_message("Firebase ініціалізовано успішно!")
         return True
     except Exception as e:
         log_message(f"Помилка ініціалізації Firebase: {e}", error=True)
+        return False
+
+def clear_firebase_data():
+    try:
+        if database_ref:
+            database_ref.delete()
+            log_message("Базу даних Firebase очищено успішно!")
+            return True
+    except Exception as e:
+        log_message(f"Помилка при очищенні бази даних: {e}", error=True)
         return False
 
 def is_valid_folder_name(folder_name):
@@ -80,6 +91,7 @@ def sync_with_firebase(directory_path):
     tracked_folders = {}
 
     try:
+        # Завантажуємо існуючі записи з Firebase
         existing_folders = database_ref.get() or {}
         for key, value in existing_folders.items():
             if 'name' in value:
@@ -88,8 +100,13 @@ def sync_with_firebase(directory_path):
                 if os.path.exists(full_path):
                     tracked_folders[folder_name] = {
                         'path': full_path,
-                        'firebase_key': key
+                        'firebase_key': key,
+                        'last_modified': os.path.getmtime(full_path)
                     }
+                else:
+                    # Якщо папки не існує - видаляємо запис з бази
+                    database_ref.child(key).delete()
+                    log_message(f"Видалено неіснуючу частоту: {folder_name} (ID: {key})")
     except Exception as e:
         log_message(f"Помилка при завантаженні існуючих папок: {e}", error=True)
 
@@ -108,11 +125,13 @@ def sync_with_firebase(directory_path):
                 new_ref.set({
                     'name': folder,
                     'timestamp': time.time(),
-                    'status': 'active'
+                    'status': 'active',
+                    'last_modified': os.path.getmtime(full_path)
                 })
                 tracked_folders[folder] = {
                     'path': full_path,
-                    'firebase_key': new_ref.key
+                    'firebase_key': new_ref.key,
+                    'last_modified': os.path.getmtime(full_path)
                 }
                 log_message(f"Додано частоту: {folder} (ID: {new_ref.key})")
 
@@ -120,12 +139,24 @@ def sync_with_firebase(directory_path):
             deleted_folders = set(tracked_folders.keys()) - current_folders
             for folder in deleted_folders:
                 if folder in tracked_folders:
-                    database_ref.child(tracked_folders[folder]['firebase_key']).update({
-                        'status': 'removed',
-                        'removed_timestamp': time.time()
-                    })
+                    database_ref.child(tracked_folders[folder]['firebase_key']).delete()
                     log_message(f"Видалено частоту: {folder} (ID: {tracked_folders[folder]['firebase_key']})")
                     del tracked_folders[folder]
+
+            # Перевірка змінених папок
+            for folder, data in list(tracked_folders.items()):
+                if folder in current_folders:
+                    full_path = os.path.join(directory_path, folder)
+                    current_mtime = os.path.getmtime(full_path)
+
+                    # Якщо папка була змінена
+                    if current_mtime > data['last_modified']:
+                        database_ref.child(data['firebase_key']).update({
+                            'timestamp': time.time(),
+                            'last_modified': current_mtime
+                        })
+                        tracked_folders[folder]['last_modified'] = current_mtime
+                        log_message(f"Оновлено часову мітку для частоти: {folder}")
 
             # Перевірка перейменованих папок
             for folder, data in list(tracked_folders.items()):
@@ -140,14 +171,23 @@ def sync_with_firebase(directory_path):
                             continue
 
                     if new_name and is_valid_folder_name(new_name):
-                        database_ref.child(data['firebase_key']).update({
+                        # Видаляємо старий запис
+                        database_ref.child(data['firebase_key']).delete()
+
+                        # Додаємо новий запис з новим ім'ям
+                        new_ref = database_ref.push()
+                        new_ref.set({
                             'name': new_name,
-                            'timestamp': time.time()
+                            'timestamp': time.time(),
+                            'status': 'active',
+                            'last_modified': os.path.getmtime(os.path.join(directory_path, new_name))
                         })
+
                         log_message(f"Перейменовано частоту: {folder} -> {new_name}")
                         tracked_folders[new_name] = {
                             'path': os.path.join(directory_path, new_name),
-                            'firebase_key': data['firebase_key']
+                            'firebase_key': new_ref.key,
+                            'last_modified': os.path.getmtime(os.path.join(directory_path, new_name))
                         }
                         del tracked_folders[folder]
 
@@ -189,11 +229,42 @@ def stop_monitoring():
         monitoring_thread.join(timeout=2)
     log_message("Моніторинг зупинено")
     messagebox.showinfo("Інформація", "Моніторинг зупинено")
+def create_log_window(show=True):
+    global log_window
+    if show:
+        if log_window is None or not log_window.winfo_exists():
+            log_window = Toplevel()
+            log_window.title("Лог моніторингу")
+            log_window.geometry("800x400")
+
+            scrollbar = Scrollbar(log_window)
+            scrollbar.pack(side="right", fill="y")
+
+            log_window.text = Text(log_window, wrap="word", yscrollcommand=scrollbar.set)
+            log_window.text.pack(expand=True, fill="both")
+
+            log_window.text.tag_config("info", foreground="green")
+            log_window.text.tag_config("error", foreground="red")
+            log_window.text.configure(state='disabled')
+
+            scrollbar.config(command=log_window.text.yview)
+    else:
+        if log_window and log_window.winfo_exists():
+            log_window.destroy()
+
+def toggle_log_window():
+    if log_window and log_window.winfo_exists():
+        create_log_window(show=False)
+    else:
+        create_log_window(show=True)
 
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Folder-Firebase Sync")
+
+        # Відкриваємо вікно логування при запуску
+        create_log_window()
 
         self.config = load_config()
 
@@ -215,7 +286,7 @@ class App:
 
         Button(root, text="Почати моніторинг", command=self.start_monitoring).grid(row=3, column=1, pady=10)
         Button(root, text="Зупинити моніторинг", command=stop_monitoring).grid(row=4, column=1, pady=5)
-        Button(root, text="Показати лог", command=create_log_window).grid(row=5, column=1, pady=5)
+        Button(root, text="Показати/сховати лог", command=toggle_log_window).grid(row=5, column=1, pady=5)
 
     def browse_key_file(self):
         from tkinter import filedialog
