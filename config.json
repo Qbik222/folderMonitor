@@ -1,5 +1,5 @@
 {
     "firebase_url": "https://test-228f2.firebaseio.com/",
-    "directory_path": "/Users/yurii/projects/monitor",
-    "firebase_key_path": "/Users/yurii/projects/maks/firebasekey.json"
+    "directory_path": "D:/monitoring/monitor",
+    "firebase_key_path": "D:/monitoring/folderMonitor/firebasekey.json"
 }

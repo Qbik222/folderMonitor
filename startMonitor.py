@@ -86,61 +86,71 @@ def create_log_window():
 
         scrollbar.config(command=log_window.text.yview)
 
+def extract_folder_info(folder_name):
+    """
+    Витягує інформацію про частоту з назви папки.
+    Повертає частоту у форматі ***.*** або None, якщо формат невірний.
+    """
+    # Логуємо вхідну назву папки
+    log_message(f"Отримано назву папки: '{folder_name}'", error=False)
+    
+    # Шукаємо послідовність з 3 цифр, роздільник (крапка/кома), і ще 3 цифри
+    match = re.search(r"(\d{3})[.,](\d{3})", folder_name)
+    
+    if match:
+        processed_name = f"{match.group(1)}.{match.group(2)}"
+        # Логуємо оброблену назву
+        log_message(f"Знайдено частоту: '{processed_name}' у папці '{folder_name}'", error=False)
+        return processed_name
+    # Логуємо невдалу спробу обробки
+    log_message(f"Не вдалося визначити частоту в папці: '{folder_name}'", error=True)
+    return None
+
 def sync_with_firebase(directory_path):
     global stop_monitoring_flag
     tracked_folders = {}
-
-    try:
-        # Завантажуємо існуючі записи з Firebase
-        existing_folders = database_ref.get() or {}
-        for key, value in existing_folders.items():
-            if 'name' in value:
-                folder_name = value['name']
-                full_path = os.path.join(directory_path, folder_name)
-                if os.path.exists(full_path):
-                    tracked_folders[folder_name] = {
-                        'path': full_path,
-                        'firebase_key': key,
-                        'last_modified': os.path.getmtime(full_path)
-                    }
-                else:
-                    # Якщо папки не існує - видаляємо запис з бази
-                    database_ref.child(key).delete()
-                    log_message(f"Видалено неіснуючу частоту: {folder_name} (ID: {key})")
-    except Exception as e:
-        log_message(f"Помилка при завантаженні існуючих папок: {e}", error=True)
-
+    
+    log_message(f"Початок моніторингу папки: {directory_path}", error=False)
+    
     while not stop_monitoring_flag:
         try:
             current_folders = set(
                 f for f in os.listdir(directory_path)
-                if os.path.isdir(os.path.join(directory_path, f)) and is_valid_folder_name(f)
+                if os.path.isdir(os.path.join(directory_path, f))
             )
-
+            
+            log_message(f"Знайдено {len(current_folders)} папок у директорії", error=False)
+            
             # Обробка нових папок
             new_folders = current_folders - set(tracked_folders.keys())
+            log_message(f"Виявлено {len(new_folders)} нових папок", error=False)
+            
             for folder in new_folders:
-                full_path = os.path.join(directory_path, folder)
-                new_ref = database_ref.push()
-                new_ref.set({
-                    'name': folder,
-                    'timestamp': time.time(),
-                    'status': 'active',
-                    'last_modified': os.path.getmtime(full_path)
-                })
-                tracked_folders[folder] = {
-                    'path': full_path,
-                    'firebase_key': new_ref.key,
-                    'last_modified': os.path.getmtime(full_path)
-                }
-                log_message(f"Додано частоту: {folder} (ID: {new_ref.key})")
+                processed_name = extract_folder_info(folder)  # Змінено на extract_folder_info
+                if processed_name:
+                    full_path = os.path.join(directory_path, folder)
+                    new_ref = database_ref.push()
+                    data = {
+                        'name': processed_name,
+                        'original_name': folder,
+                        'timestamp': time.time(),
+                        'status': 'active',
+                        'last_modified': os.path.getmtime(full_path)
+                    }
+                    new_ref.set(data)
+                    tracked_folders[folder] = {
+                        'path': full_path,
+                        'firebase_key': new_ref.key,
+                        'last_modified': os.path.getmtime(full_path)
+                    }
+                    log_message(f"Додано до Firebase: {processed_name} (оригінал: {folder})", error=False)
 
             # Обробка видалених папок
             deleted_folders = set(tracked_folders.keys()) - current_folders
             for folder in deleted_folders:
                 if folder in tracked_folders:
                     database_ref.child(tracked_folders[folder]['firebase_key']).delete()
-                    log_message(f"Видалено частоту: {folder} (ID: {tracked_folders[folder]['firebase_key']})")
+                    log_message(f"Видалено частоту: {folder}")
                     del tracked_folders[folder]
 
             # Перевірка змінених папок
@@ -148,55 +158,19 @@ def sync_with_firebase(directory_path):
                 if folder in current_folders:
                     full_path = os.path.join(directory_path, folder)
                     current_mtime = os.path.getmtime(full_path)
-
-                    # Якщо папка була змінена
                     if current_mtime > data['last_modified']:
                         database_ref.child(data['firebase_key']).update({
-                            'timestamp': time.time(),
-                            'last_modified': current_mtime
+                            'last_modified': current_mtime,
+                            'timestamp': time.time()
                         })
                         tracked_folders[folder]['last_modified'] = current_mtime
-                        log_message(f"Оновлено часову мітку для частоти: {folder}")
-
-            # Перевірка перейменованих папок
-            for folder, data in list(tracked_folders.items()):
-                if not os.path.exists(data['path']):
-                    new_name = None
-                    for f in current_folders:
-                        try:
-                            if os.path.samefile(os.path.join(directory_path, f), data['path']):
-                                new_name = f
-                                break
-                        except FileNotFoundError:
-                            continue
-
-                    if new_name and is_valid_folder_name(new_name):
-                        # Видаляємо старий запис
-                        database_ref.child(data['firebase_key']).delete()
-
-                        # Додаємо новий запис з новим ім'ям
-                        new_ref = database_ref.push()
-                        new_ref.set({
-                            'name': new_name,
-                            'timestamp': time.time(),
-                            'status': 'active',
-                            'last_modified': os.path.getmtime(os.path.join(directory_path, new_name))
-                        })
-
-                        log_message(f"Перейменовано частоту: {folder} -> {new_name}")
-                        tracked_folders[new_name] = {
-                            'path': os.path.join(directory_path, new_name),
-                            'firebase_key': new_ref.key,
-                            'last_modified': os.path.getmtime(os.path.join(directory_path, new_name))
-                        }
-                        del tracked_folders[folder]
+                        log_message(f"Оновлено часову мітку для: {folder}")
 
             time.sleep(5)
 
         except Exception as e:
             log_message(f"Помилка синхронізації: {e}", error=True)
             time.sleep(10)
-
 def start_monitoring(directory_path, firebase_url, firebase_key_path):
     global monitoring_thread, stop_monitoring_flag
 
@@ -229,6 +203,7 @@ def stop_monitoring():
         monitoring_thread.join(timeout=2)
     log_message("Моніторинг зупинено")
     messagebox.showinfo("Інформація", "Моніторинг зупинено")
+
 def create_log_window(show=True):
     global log_window
     if show:
