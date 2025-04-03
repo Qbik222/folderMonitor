@@ -1,5 +1,6 @@
 {
     "firebase_url": "https://test-228f2.firebaseio.com/",
     "directory_path": "D:/monitoring/monitor",
-    "firebase_key_path": "D:/monitoring/folderMonitor/firebasekey.json"
+    "firebase_key_path": "D:/monitoring/folderMonitor/firebasekey.json",
+    "update_interval_sec": "5"
 }

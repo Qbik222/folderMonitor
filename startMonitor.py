@@ -14,12 +14,19 @@ database_ref = None
 monitoring_thread = None
 stop_monitoring_flag = False
 log_window = None
+update_interval_sec = 5  # Додана глобальна змінна для інтервалу оновлення
+tracked_folders = {}
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as file:
-            return json.load(file)
-    return {}
+            config = json.load(file)
+            # Додаємо значення за замовчуванням для інтервалу, якщо його немає
+            if "update_interval_sec" not in config:
+                config["update_interval_sec"] = "5"
+            return config
+    return {"update_interval_sec": "5"}
 
 def save_config(config):
     with open(CONFIG_FILE, "w") as file:
@@ -91,26 +98,22 @@ def extract_folder_info(folder_name):
     Витягує інформацію про частоту з назви папки.
     Повертає частоту у форматі ***.*** або None, якщо формат невірний.
     """
-    # Логуємо вхідну назву папки
     log_message(f"Отримано назву папки: '{folder_name}'", error=False)
     
-    # Шукаємо послідовність з 3 цифр, роздільник (крапка/кома), і ще 3 цифри
     match = re.search(r"(\d{3})[.,](\d{3})", folder_name)
     
     if match:
         processed_name = f"{match.group(1)}.{match.group(2)}"
-        # Логуємо оброблену назву
         log_message(f"Знайдено частоту: '{processed_name}' у папці '{folder_name}'", error=False)
         return processed_name
-    # Логуємо невдалу спробу обробки
     log_message(f"Не вдалося визначити частоту в папці: '{folder_name}'", error=True)
     return None
 
 def sync_with_firebase(directory_path):
-    global stop_monitoring_flag
-    tracked_folders = {}
+    global stop_monitoring_flag, update_interval_sec
     
     log_message(f"Початок моніторингу папки: {directory_path}", error=False)
+    log_message(f"Поточний інтервал оновлення: {update_interval_sec} сек", error=False)
     
     while not stop_monitoring_flag:
         try:
@@ -121,12 +124,11 @@ def sync_with_firebase(directory_path):
             
             log_message(f"Знайдено {len(current_folders)} папок у директорії", error=False)
             
-            # Обробка нових папок
             new_folders = current_folders - set(tracked_folders.keys())
             log_message(f"Виявлено {len(new_folders)} нових папок", error=False)
             
             for folder in new_folders:
-                processed_name = extract_folder_info(folder)  # Змінено на extract_folder_info
+                processed_name = extract_folder_info(folder)
                 if processed_name:
                     full_path = os.path.join(directory_path, folder)
                     new_ref = database_ref.push()
@@ -145,7 +147,6 @@ def sync_with_firebase(directory_path):
                     }
                     log_message(f"Додано до Firebase: {processed_name} (оригінал: {folder})", error=False)
 
-            # Обробка видалених папок
             deleted_folders = set(tracked_folders.keys()) - current_folders
             for folder in deleted_folders:
                 if folder in tracked_folders:
@@ -153,7 +154,6 @@ def sync_with_firebase(directory_path):
                     log_message(f"Видалено частоту: {folder}")
                     del tracked_folders[folder]
 
-            # Перевірка змінених папок
             for folder, data in list(tracked_folders.items()):
                 if folder in current_folders:
                     full_path = os.path.join(directory_path, folder)
@@ -166,11 +166,12 @@ def sync_with_firebase(directory_path):
                         tracked_folders[folder]['last_modified'] = current_mtime
                         log_message(f"Оновлено часову мітку для: {folder}")
 
-            time.sleep(5)
+            time.sleep(update_interval_sec)
 
         except Exception as e:
             log_message(f"Помилка синхронізації: {e}", error=True)
-            time.sleep(10)
+            time.sleep(update_interval_sec)
+
 def start_monitoring(directory_path, firebase_url, firebase_key_path):
     global monitoring_thread, stop_monitoring_flag
 
@@ -238,7 +239,6 @@ class App:
         self.root = root
         self.root.title("Folder-Firebase Sync")
 
-        # Відкриваємо вікно логування при запуску
         create_log_window()
 
         self.config = load_config()
@@ -246,6 +246,7 @@ class App:
         self.firebase_url = StringVar(value=self.config.get("firebase_url", ""))
         self.firebase_key_path = StringVar(value=self.config.get("firebase_key_path", ""))
         self.directory_path = StringVar(value=self.config.get("directory_path", ""))
+        self.update_interval = StringVar(value=self.config.get("update_interval_sec", "5"))
 
         # UI Elements
         Label(root, text="Firebase URL:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
@@ -259,9 +260,13 @@ class App:
         Entry(root, textvariable=self.directory_path, width=50).grid(row=2, column=1, padx=5, pady=5)
         Button(root, text="Огляд...", command=self.browse_directory).grid(row=2, column=2, padx=5, pady=5)
 
-        Button(root, text="Почати моніторинг", command=self.start_monitoring).grid(row=3, column=1, pady=10)
-        Button(root, text="Зупинити моніторинг", command=stop_monitoring).grid(row=4, column=1, pady=5)
-        Button(root, text="Показати/сховати лог", command=toggle_log_window).grid(row=5, column=1, pady=5)
+        # Додано поле для інтервалу оновлення
+        Label(root, text="Інтервал оновлення (сек):").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        Entry(root, textvariable=self.update_interval, width=10).grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
+        Button(root, text="Почати моніторинг", command=self.start_monitoring).grid(row=4, column=1, pady=10)
+        Button(root, text="Зупинити моніторинг", command=stop_monitoring).grid(row=5, column=1, pady=5)
+        Button(root, text="Показати/сховати лог", command=toggle_log_window).grid(row=6, column=1, pady=5)
 
     def browse_key_file(self):
         from tkinter import filedialog
@@ -276,10 +281,23 @@ class App:
             self.directory_path.set(directory)
 
     def start_monitoring(self):
+        global update_interval_sec
+        
+        try:
+            interval = int(self.update_interval.get())
+            if interval < 1:
+                messagebox.showerror("Помилка", "Інтервал оновлення повинен бути не менше 1 секунди")
+                return False
+            update_interval_sec = interval
+        except ValueError:
+            messagebox.showerror("Помилка", "Введіть коректне число для інтервалу оновлення")
+            return False
+
         self.config.update({
             "firebase_url": self.firebase_url.get(),
             "firebase_key_path": self.firebase_key_path.get(),
-            "directory_path": self.directory_path.get()
+            "directory_path": self.directory_path.get(),
+            "update_interval_sec": self.update_interval.get()
         })
         save_config(self.config)
 
@@ -289,6 +307,8 @@ class App:
             self.firebase_key_path.get()
         ):
             messagebox.showinfo("Успіх", "Моніторинг запущено!")
+            return True
+        return False
 
 if __name__ == "__main__":
     root = Tk()
