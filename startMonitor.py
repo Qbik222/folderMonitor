@@ -46,13 +46,15 @@ def initialize_firebase(url, key_path):
 def clear_firebase_data(window_name):
     try:
         if database_ref:
+            # Видаляємо всі дані для цього вікна
             db.reference(f"/frequency/{window_name}").delete()
-            log_message(window_name, f"Дані вікна {window_name} очищено успішно!")
+            log_message("Global", f"Дані вікна {window_name} очищено успішно!")
             return True
     except Exception as e:
-        log_message(window_name, f"Помилка при очищенні даних: {e}", error=True)
+        log_message("Global", f"Помилка при очищенні даних для {window_name}: {e}", error=True)
         return False
 
+        
 def is_valid_folder_name(folder_name):
     return re.match(r"^\d{3}\.\d{3}$", folder_name) is not None
 
@@ -367,27 +369,56 @@ class MainApp:
         self.new_window_name.set("")
         self.update_windows_list()
     
+
     def update_windows_list(self):
-        # Clear existing widgets
+        # Очищаємо попередній список
         for widget in self.windows_frame.winfo_children():
             widget.destroy()
-        
+
         if not self.windows_data:
             Label(self.windows_frame, text="Немає створених вікон моніторингу").pack(pady=10)
             return
-        
+
         Label(self.windows_frame, text="Список вікон моніторингу:").pack(anchor="w")
-        
+
         for window_name in sorted(self.windows_data.keys()):
             frame = Frame(self.windows_frame)
             frame.pack(fill="x", pady=2)
+
+            # Створюємо змінні для статусу
+            status_var = StringVar()
+            is_active = window_name in monitoring_threads and monitoring_threads[window_name].is_alive()
+            status_var.set("🟢 Активний" if is_active else "🔴 Вимкнений")
             
+            # Створюємо елементи інтерфейсу
             Label(frame, text=window_name, width=20).pack(side="left")
+            status_label = Label(frame, textvariable=status_var, 
+                               fg="green" if is_active else "red")
+            status_label.pack(side="left", padx=5)
+            
             Button(frame, text="Відкрити", 
                   command=lambda wn=window_name: self.open_monitoring_window(wn)).pack(side="left", padx=5)
             Button(frame, text="Видалити", 
                   command=lambda wn=window_name: self.delete_window(wn)).pack(side="left", padx=5)
-    
+
+            # Запускаємо перевірку статусу для цього вікна
+            self.start_status_check(window_name, status_var, status_label)
+
+    def start_status_check(self, window_name, status_var, status_label):
+        def check_status():
+            if window_name not in self.windows_data:
+                return
+                
+            is_active = window_name in monitoring_threads and monitoring_threads[window_name].is_alive()
+            status_var.set("🟢 Активний" if is_active else "🔴 Вимкнений")
+            status_label.config(fg="green" if is_active else "red")
+            
+            # Плануємо наступну перевірку через 1 секунду
+            self.root.after(1000, check_status)
+        
+        # Запускаємо першу перевірку
+        check_status()
+
     def open_monitoring_window(self, window_name):
         if not self.firebase_url.get() or not self.firebase_key_path.get():
             messagebox.showerror("Помилка", "Спочатку вкажіть Firebase URL та шлях до ключа!")
@@ -400,18 +431,43 @@ class MainApp:
     
     def delete_window(self, window_name):
         if messagebox.askyesno("Підтвердження", f"Видалити вікно {window_name}? Дані моніторингу буде втрачено."):
+            # Зупиняємо моніторинг, якщо він активний
             if window_name in monitoring_threads and monitoring_threads[window_name].is_alive():
                 stop_monitoring_window(window_name)
             
-            if window_name in self.windows_data:
-                del self.windows_data[window_name]
-                self.save_windows_data()
-            
+            # Закриваємо вікно логу, якщо воно відкрите
             if window_name in log_windows and log_windows[window_name].winfo_exists():
                 log_windows[window_name].destroy()
                 del log_windows[window_name]
             
+            # Видаляємо зі списку відстежуваних папок
+            if window_name in tracked_folders:
+                del tracked_folders[window_name]
+            
+            # Видаляємо зі списку інтервалів оновлення
+            if window_name in update_intervals:
+                del update_intervals[window_name]
+            
+            # Видаляємо зі списку потоків моніторингу
+            if window_name in monitoring_threads:
+                del monitoring_threads[window_name]
+            
+            # Видаляємо зі списку прапорців зупинки
+            if window_name in stop_monitoring_flags:
+                del stop_monitoring_flags[window_name]
+            
+            # Видаляємо з конфігурації
+            if window_name in self.windows_data:
+                del self.windows_data[window_name]
+                self.save_windows_data()
+            
+            # Оновлюємо список вікон
             self.update_windows_list()
+            
+            # Очищаємо дані в Firebase
+            clear_firebase_data(window_name)
+            
+            log_message("Global", f"Вікно {window_name} повністю видалено")
 
 if __name__ == "__main__":
     root = Tk()
