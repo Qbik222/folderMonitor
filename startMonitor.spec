@@ -37,9 +37,3 @@ exe = EXE(
     entitlements_file=None,
     icon=['app.ico'],
 )
-app = BUNDLE(
-    exe,
-    name='startMonitor.app',
-    icon='app.ico',
-    bundle_identifier=None,
-)
