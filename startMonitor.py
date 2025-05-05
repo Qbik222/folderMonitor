@@ -15,8 +15,7 @@ monitoring_threads = {}
 stop_monitoring_flags = {}
 log_windows = {}
 update_intervals = {}
-tracked_folders = {}
-
+tracked_files = {}
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -46,17 +45,12 @@ def initialize_firebase(url, key_path):
 def clear_firebase_data(window_name):
     try:
         if database_ref:
-            # Видаляємо всі дані для цього вікна
             db.reference(f"/frequency/{window_name}").delete()
             log_message("Global", f"Дані вікна {window_name} очищено успішно!")
             return True
     except Exception as e:
         log_message("Global", f"Помилка при очищенні даних для {window_name}: {e}", error=True)
         return False
-
-        
-def is_valid_folder_name(folder_name):
-    return re.match(r"^\d{3}\.\d{3}$", folder_name) is not None
 
 def log_message(window_name, message, error=False):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -89,72 +83,96 @@ def create_log_window(window_name):
 
         scrollbar.config(command=log_windows[window_name].text.yview)
 
-def extract_folder_info(folder_name):
-    match = re.search(r"(\d{3})[.,](\d{3})", folder_name)
-    if match:
-        return f"{match.group(1)}.{match.group(2)}"
+def extract_frequency_from_file(file_path):
+    try:
+        filename = os.path.splitext(os.path.basename(file_path))[0]
+
+        # Пошук у форматі XXX.XXX або XXX,XXX
+        match = re.search(r'(\d{3})[.,](\d{3})', filename)
+        if match:
+            return f"{match.group(1)}.{match.group(2)}"
+
+        # Пошук числа з 3 до 6 цифр
+        match = re.search(r'\d{3,6}', filename)
+        if match:
+            number = match.group(0)
+            if len(number) == 3:
+                return f"{number}.000"
+            else:
+                return f"{number[:3]}.{number[3:]}"
+
+    except Exception as e:
+        log_message("Global", f"Помилка аналізу назви файлу {file_path}: {e}", error=True)
+
     return None
 
+def scan_directory_recursive(directory):
+    frequencies = {}
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            frequency = extract_frequency_from_file(file_path)
+            if frequency:
+                frequencies[file_path] = {
+                    'frequency': frequency,
+                    'last_modified': os.path.getmtime(file_path)
+                }
+    return frequencies
+
 def sync_with_firebase(window_name, directory_path):
-    global stop_monitoring_flags, update_intervals, tracked_folders
-    
-    if window_name not in tracked_folders:
-        tracked_folders[window_name] = {}
-    
+    global stop_monitoring_flags, update_intervals, tracked_files
+
+    if window_name not in tracked_files:
+        tracked_files[window_name] = {}
+
     log_message(window_name, f"Початок моніторингу папки: {directory_path}")
     log_message(window_name, f"Поточний інтервал оновлення: {update_intervals.get(window_name, 5)} сек")
-    
+
     while not stop_monitoring_flags.get(window_name, False):
         try:
-            current_folders = set(
-                f for f in os.listdir(directory_path)
-                if os.path.isdir(os.path.join(directory_path, f))
-            )
-            
-            log_message(window_name, f"Знайдено {len(current_folders)} папок у директорії")
-            
-            new_folders = current_folders - set(tracked_folders[window_name].keys())
-            log_message(window_name, f"Виявлено {len(new_folders)} нових папок")
-            
-            for folder in new_folders:
-                processed_name = extract_folder_info(folder)
-                if processed_name:
-                    full_path = os.path.join(directory_path, folder)
-                    new_ref = db.reference(f"/frequency/{window_name}").push()
+            current_files = scan_directory_recursive(directory_path)
+            log_message(window_name, f"Знайдено {len(current_files)} файлів з частотами у директорії")
+
+            # Видалені файли
+            deleted_files = set(tracked_files[window_name].keys()) - set(current_files.keys())
+            for file_path in deleted_files:
+                if file_path in tracked_files[window_name]:
+                    db.reference(f"/frequency/{window_name}/{tracked_files[window_name][file_path]['firebase_key']}").delete()
+                    log_message(window_name, f"Видалено частоту: {tracked_files[window_name][file_path]['frequency']} (файл: {file_path})")
+                    del tracked_files[window_name][file_path]
+
+            # Нові або змінені файли
+            for file_path, file_data in current_files.items():
+                if 'frequency' not in file_data:
+                    log_message(window_name, f"Пропущено файл без частоти: {file_path}", error=True)
+                    continue
+
+                if (file_path not in tracked_files[window_name] or
+                    file_data['last_modified'] > tracked_files[window_name][file_path]['last_modified']):
+
+                    if file_path not in tracked_files[window_name]:
+                        new_ref = db.reference(f"/frequency/{window_name}").push()
+                        tracked_files[window_name][file_path] = {
+                            'firebase_key': new_ref.key,
+                            'last_modified': file_data['last_modified'],
+                            'frequency': file_data['frequency']
+                        }
+                    else:
+                        new_ref = db.reference(f"/frequency/{window_name}/{tracked_files[window_name][file_path]['firebase_key']}")
+                        tracked_files[window_name][file_path]['last_modified'] = file_data['last_modified']
+                        tracked_files[window_name][file_path]['frequency'] = file_data['frequency']
+
                     data = {
-                        'name': processed_name,
-                        'original_name': folder,
+                        'name': file_data['frequency'],
+                        'file_path': file_path,
                         'timestamp': time.time(),
                         'status': 'active',
-                        'last_modified': os.path.getmtime(full_path),
+                        'last_modified': file_data['last_modified'],
                         'window_name': window_name
                     }
                     new_ref.set(data)
-                    tracked_folders[window_name][folder] = {
-                        'path': full_path,
-                        'firebase_key': new_ref.key,
-                        'last_modified': os.path.getmtime(full_path)
-                    }
-                    log_message(window_name, f"Додано до Firebase: {processed_name} (оригінал: {folder})")
 
-            deleted_folders = set(tracked_folders[window_name].keys()) - current_folders
-            for folder in deleted_folders:
-                if folder in tracked_folders[window_name]:
-                    db.reference(f"/frequency/{window_name}/{tracked_folders[window_name][folder]['firebase_key']}").delete()
-                    log_message(window_name, f"Видалено частоту: {folder}")
-                    del tracked_folders[window_name][folder]
-
-            for folder, data in list(tracked_folders[window_name].items()):
-                if folder in current_folders:
-                    full_path = os.path.join(directory_path, folder)
-                    current_mtime = os.path.getmtime(full_path)
-                    if current_mtime > data['last_modified']:
-                        db.reference(f"/frequency/{window_name}/{data['firebase_key']}").update({
-                            'last_modified': current_mtime,
-                            'timestamp': time.time()
-                        })
-                        tracked_folders[window_name][folder]['last_modified'] = current_mtime
-                        log_message(window_name, f"Оновлено часову мітку для: {folder}")
+                    log_message(window_name, f"Оновлено частоту: {file_data['frequency']} (файл: {file_path})")
 
             time.sleep(update_intervals.get(window_name, 5))
 
@@ -212,11 +230,9 @@ class MonitoringWindow:
         self.monitoring_status = StringVar(value="Моніторинг вимкнено")
         self.status_color = "red"
         
-        # UI Elements
         Label(self.window, text="Назва вікна:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
         Label(self.window, text=window_name).grid(row=0, column=1, sticky="w", padx=5, pady=5)
         
-        # Status label
         self.status_label = Label(self.window, textvariable=self.monitoring_status, fg=self.status_color)
         self.status_label.grid(row=0, column=2, sticky="e", padx=10, pady=5)
         
@@ -231,7 +247,6 @@ class MonitoringWindow:
         Button(self.window, text="Зупинити моніторинг", command=self.stop_monitoring).grid(row=4, column=1, pady=5)
         Button(self.window, text="Показати/сховати лог", command=self.toggle_log).grid(row=5, column=1, pady=5)
         
-        # Load saved data if exists
         if window_name in self.main_app.windows_data:
             data = self.main_app.windows_data[window_name]
             self.directory_path.set(data.get("directory_path", ""))
@@ -263,7 +278,6 @@ class MonitoringWindow:
             messagebox.showerror("Помилка", "Введіть коректне число для інтервалу оновлення")
             return False
 
-        # Save window data
         self.main_app.windows_data[self.window_name] = {
             "directory_path": self.directory_path.get(),
             "update_interval": self.update_interval.get()
@@ -298,7 +312,6 @@ class MainApp:
         self.firebase_key_path = StringVar(value=self.config.get("firebase_key_path", ""))
         self.new_window_name = StringVar()
         
-        # UI Elements
         Label(root, text="Firebase URL:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
         Entry(root, textvariable=self.firebase_url, width=50).grid(row=0, column=1, padx=5, pady=5)
 
@@ -306,24 +319,20 @@ class MainApp:
         Entry(root, textvariable=self.firebase_key_path, width=50).grid(row=1, column=1, padx=5, pady=5)
         Button(root, text="Огляд...", command=self.browse_key_file).grid(row=1, column=2, padx=5, pady=5)
         
-        # Separator
         ttk.Separator(root, orient="horizontal").grid(row=2, column=0, columnspan=3, sticky="ew", pady=10)
         
         Label(root, text="Назва нового вікна моніторингу:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
         Entry(root, textvariable=self.new_window_name, width=30).grid(row=3, column=1, sticky="w", padx=5, pady=5)
         Button(root, text="Створити вікно", command=self.create_monitoring_window).grid(row=3, column=2, padx=5, pady=5)
         
-        # List of existing windows
         self.windows_frame = Frame(root)
         self.windows_frame.grid(row=4, column=0, columnspan=3, padx=10, pady=10, sticky="nsew")
         
         self.update_windows_list()
         
-        # Configure grid weights
         root.grid_rowconfigure(4, weight=1)
         root.grid_columnconfigure(1, weight=1)
         
-        # Create log window for global messages
         create_log_window("Global")
     
     def browse_key_file(self):
@@ -369,9 +378,7 @@ class MainApp:
         self.new_window_name.set("")
         self.update_windows_list()
     
-
     def update_windows_list(self):
-        # Очищаємо попередній список
         for widget in self.windows_frame.winfo_children():
             widget.destroy()
 
@@ -385,12 +392,10 @@ class MainApp:
             frame = Frame(self.windows_frame)
             frame.pack(fill="x", pady=2)
 
-            # Створюємо змінні для статусу
             status_var = StringVar()
             is_active = window_name in monitoring_threads and monitoring_threads[window_name].is_alive()
             status_var.set("🟢 Активний" if is_active else "🔴 Вимкнений")
             
-            # Створюємо елементи інтерфейсу
             Label(frame, text=window_name, width=20).pack(side="left")
             status_label = Label(frame, textvariable=status_var, 
                                fg="green" if is_active else "red")
@@ -401,7 +406,6 @@ class MainApp:
             Button(frame, text="Видалити", 
                   command=lambda wn=window_name: self.delete_window(wn)).pack(side="left", padx=5)
 
-            # Запускаємо перевірку статусу для цього вікна
             self.start_status_check(window_name, status_var, status_label)
 
     def start_status_check(self, window_name, status_var, status_label):
@@ -413,10 +417,8 @@ class MainApp:
             status_var.set("🟢 Активний" if is_active else "🔴 Вимкнений")
             status_label.config(fg="green" if is_active else "red")
             
-            # Плануємо наступну перевірку через 1 секунду
             self.root.after(1000, check_status)
         
-        # Запускаємо першу перевірку
         check_status()
 
     def open_monitoring_window(self, window_name):
@@ -431,40 +433,31 @@ class MainApp:
     
     def delete_window(self, window_name):
         if messagebox.askyesno("Підтвердження", f"Видалити вікно {window_name}? Дані моніторингу буде втрачено."):
-            # Зупиняємо моніторинг, якщо він активний
             if window_name in monitoring_threads and monitoring_threads[window_name].is_alive():
                 stop_monitoring_window(window_name)
             
-            # Закриваємо вікно логу, якщо воно відкрите
             if window_name in log_windows and log_windows[window_name].winfo_exists():
                 log_windows[window_name].destroy()
                 del log_windows[window_name]
             
-            # Видаляємо зі списку відстежуваних папок
-            if window_name in tracked_folders:
-                del tracked_folders[window_name]
+            if window_name in tracked_files:
+                del tracked_files[window_name]
             
-            # Видаляємо зі списку інтервалів оновлення
             if window_name in update_intervals:
                 del update_intervals[window_name]
             
-            # Видаляємо зі списку потоків моніторингу
             if window_name in monitoring_threads:
                 del monitoring_threads[window_name]
             
-            # Видаляємо зі списку прапорців зупинки
             if window_name in stop_monitoring_flags:
                 del stop_monitoring_flags[window_name]
             
-            # Видаляємо з конфігурації
             if window_name in self.windows_data:
                 del self.windows_data[window_name]
                 self.save_windows_data()
             
-            # Оновлюємо список вікон
             self.update_windows_list()
             
-            # Очищаємо дані в Firebase
             clear_firebase_data(window_name)
             
             log_message("Global", f"Вікно {window_name} повністю видалено")
