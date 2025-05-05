@@ -21,7 +21,6 @@ grpcio-status==1.71.0
 httplib2==0.22.0
 idna==3.10
 msgpack==1.1.0
-Nuitka==2.6.9
 ordered-set==4.1.0
 packaging==24.2
 pefile==2023.2.7
@@ -30,6 +29,8 @@ protobuf==5.29.4
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pycparser==2.22
+pyinstaller==6.13.0
+pyinstaller-hooks-contrib==2025.4
 PyJWT==2.10.1
 pyparsing==3.2.3
 pywin32-ctypes==0.2.3
