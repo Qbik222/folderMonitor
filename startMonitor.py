@@ -106,11 +106,17 @@ def extract_frequency_from_file(file_path):
 
     return None
 
-def scan_directory_recursive(directory):
+def scan_directory_recursive(directory, existing_files=None):
     frequencies = {}
+    if existing_files is None:
+        existing_files = set()
+    
     for root, dirs, files in os.walk(directory):
         for file in files:
             file_path = os.path.join(root, file)
+            if file_path in existing_files:
+                continue
+                
             frequency = extract_frequency_from_file(file_path)
             if frequency:
                 frequencies[file_path] = {
@@ -125,13 +131,22 @@ def sync_with_firebase(window_name, directory_path):
     if window_name not in tracked_files:
         tracked_files[window_name] = {}
 
+    # При першому запуску отримуємо список всіх існуючих файлів
+    initial_files = set()
+    for root, dirs, files in os.walk(directory_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+            initial_files.add(file_path)
+
     log_message(window_name, f"Початок моніторингу папки: {directory_path}")
+    log_message(window_name, f"Ігнорується {len(initial_files)} існуючих файлів")
     log_message(window_name, f"Поточний інтервал оновлення: {update_intervals.get(window_name, 5)} сек")
 
     while not stop_monitoring_flags.get(window_name, False):
         try:
-            current_files = scan_directory_recursive(directory_path)
-            log_message(window_name, f"Знайдено {len(current_files)} файлів з частотами у директорії")
+            # Скануємо тільки нові файли (не існуючі на момент запуску)
+            current_files = scan_directory_recursive(directory_path, initial_files)
+            log_message(window_name, f"Знайдено {len(current_files)} нових файлів з частотами у директорії")
 
             # Видалені файли
             deleted_files = set(tracked_files[window_name].keys()) - set(current_files.keys())
